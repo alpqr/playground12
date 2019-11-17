@@ -11,9 +11,12 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <vector>
-#include <chrono>
 #include <functional>
+#include <chrono>
+#include <thread>
+#include <mutex>
 
+const D3D_FEATURE_LEVEL FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
 const int DEFAULT_WIDTH = 1280;
 const int DEFAULT_HEIGHT = 720;
 const int SWAPCHAIN_BUFFER_COUNT = 2;
@@ -58,8 +61,9 @@ struct DescHeapMgr
     void releaseResources();
 
     D3D12_CPU_DESCRIPTOR_HANDLE allocate(D3D12_DESCRIPTOR_HEAP_TYPE type,
+        UINT n,
         D3D12_DESCRIPTOR_HEAP_FLAGS flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
-    void release(D3D12_CPU_DESCRIPTOR_HANDLE handle, D3D12_DESCRIPTOR_HEAP_TYPE type);
+    void release(D3D12_CPU_DESCRIPTOR_HANDLE handle, UINT n);
     UINT handleSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const;
 
     static const UINT BUCKETS_PER_HEAP = 8;
@@ -67,6 +71,7 @@ struct DescHeapMgr
     static const UINT MAX_DESCRIPTORS_PER_HEAP = BUCKETS_PER_HEAP * DESCRIPTORS_PER_BUCKET;
 
     ID3D12Device *m_device = nullptr;
+    std::mutex m_mutex;
     struct Heap {
         D3D12_DESCRIPTOR_HEAP_TYPE type;
         D3D12_DESCRIPTOR_HEAP_FLAGS flags;
@@ -79,23 +84,49 @@ struct DescHeapMgr
     UINT m_handleSizes[D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES];
 };
 
-D3D12_CPU_DESCRIPTOR_HANDLE DescHeapMgr::allocate(D3D12_DESCRIPTOR_HEAP_TYPE type, D3D12_DESCRIPTOR_HEAP_FLAGS flags)
+D3D12_CPU_DESCRIPTOR_HANDLE DescHeapMgr::allocate(D3D12_DESCRIPTOR_HEAP_TYPE type, UINT n, D3D12_DESCRIPTOR_HEAP_FLAGS flags)
 {
+    if (n < 1)
+        return {};
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     D3D12_CPU_DESCRIPTOR_HANDLE h = {};
     for (Heap &heap : m_heaps) {
         if (heap.type != type || heap.flags != flags)
             continue;
-        for (UINT bucket = 0; bucket < _countof(heap.freeMap); ++bucket) {
-            if (!heap.freeMap[bucket])
-                continue;
-            DWORD freePos;
-            _BitScanForward(&freePos, heap.freeMap[bucket]);
-            heap.freeMap[bucket] &= ~(1UL << freePos);
-            //log("descriptor handle heap %p type %x reserve in bucket %u index %u", &heap, type, bucket, freePos);
-            freePos += bucket * DESCRIPTORS_PER_BUCKET;
-            h = heap.start;
-            h.ptr += SIZE_T(freePos) * heap.handleSize;
-            return h;
+
+        for (UINT startBucket = 0; startBucket < _countof(heap.freeMap); ++startBucket) {
+            UINT32 map = heap.freeMap[startBucket];
+            while (map) {
+                DWORD freePosInBucket;
+                _BitScanForward(&freePosInBucket, map);
+                const UINT freePos = freePosInBucket + startBucket * DESCRIPTORS_PER_BUCKET;
+
+                // are there n consecutive free entries starting at freePos?
+                bool canUse = true;
+                for (UINT pos = freePos + 1; pos < freePos + n; ++pos) {
+                    const UINT bucket = pos / DESCRIPTORS_PER_BUCKET;
+                    const UINT indexInBucket = pos - bucket * DESCRIPTORS_PER_BUCKET;
+                    if (!(heap.freeMap[bucket] & (1UL << indexInBucket))) {
+                        canUse = false;
+                        break;
+                    }
+                }
+
+                if (canUse) {
+                    for (UINT pos = freePos; pos < freePos + n; ++pos) {
+                        const UINT bucket = pos / DESCRIPTORS_PER_BUCKET;
+                        const UINT indexInBucket = pos - bucket * DESCRIPTORS_PER_BUCKET;
+                        heap.freeMap[bucket] &= ~(1UL << indexInBucket);
+                        log("reserve descriptor handle, heap %p type %x bucket %u index %u",
+                            &heap, type, bucket, indexInBucket);
+                    }
+                    h.ptr = heap.start.ptr + SIZE_T(freePos) * heap.handleSize;
+                    return h;
+                }
+
+                map &= ~(1UL << freePosInBucket);
+            }
         }
     }
 
@@ -116,33 +147,45 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescHeapMgr::allocate(D3D12_DESCRIPTOR_HEAP_TYPE typ
     }
 
     heap.start = heap.heap->GetCPUDescriptorHandleForHeapStart();
-    //log("new descriptor heap, type %x, start %llu", type, heap.start.ptr);
+    log("new descriptor heap, type %x, start %llu", type, heap.start.ptr);
 
-    heap.freeMap[0] = 0xFFFFFFFE;
-    for (int i = 1; i < _countof(heap.freeMap); ++i)
+    for (int i = 0; i < _countof(heap.freeMap); ++i)
         heap.freeMap[i] = 0xFFFFFFFF;
+
+    for (UINT pos = 0; pos < n; ++pos) {
+        const UINT bucket = pos / DESCRIPTORS_PER_BUCKET;
+        const UINT indexInBucket = pos - bucket * DESCRIPTORS_PER_BUCKET;
+        heap.freeMap[bucket] &= ~(1UL << indexInBucket);
+    }
 
     h = heap.start;
     m_heaps.push_back(heap);
+
     return h;
 }
 
-void DescHeapMgr::release(D3D12_CPU_DESCRIPTOR_HANDLE handle, D3D12_DESCRIPTOR_HEAP_TYPE type)
+void DescHeapMgr::release(D3D12_CPU_DESCRIPTOR_HANDLE handle, UINT n)
 {
+    if (n < 1)
+        return;
+    std::lock_guard<std::mutex> lock(m_mutex);
+
     for (Heap &heap : m_heaps) {
-        if (heap.type == type
-            && handle.ptr >= heap.start.ptr
-            && handle.ptr < heap.start.ptr + SIZE_T(heap.handleSize) * MAX_DESCRIPTORS_PER_HEAP)
+        if(handle.ptr >= heap.start.ptr
+            && handle.ptr + n * heap.handleSize <= heap.start.ptr + MAX_DESCRIPTORS_PER_HEAP * heap.handleSize)
         {
-            const SIZE_T pos = (handle.ptr - heap.start.ptr) / heap.handleSize;
-            const UINT bucket = UINT(pos) / DESCRIPTORS_PER_BUCKET;
-            const UINT indexInBucket = UINT(pos) - bucket * DESCRIPTORS_PER_BUCKET;
-            heap.freeMap[bucket] |= 1UL << indexInBucket;
-            //log("free descriptor handle heap %p type %x bucket %u index %u", &heap, type, bucket, indexInBucket);
+            const SIZE_T startPos = (handle.ptr - heap.start.ptr) / heap.handleSize;
+            for (SIZE_T pos = startPos; pos < startPos + n; ++pos) {
+                const UINT bucket = UINT(pos) / DESCRIPTORS_PER_BUCKET;
+                const UINT indexInBucket = UINT(pos) - bucket * DESCRIPTORS_PER_BUCKET;
+                heap.freeMap[bucket] |= 1UL << indexInBucket;
+                log("free descriptor handle, heap %p type %x bucket %u index %u",
+                    &heap, heap.type, bucket, indexInBucket);
+            }
             return;
         }
     }
-    log("Attempted to release untracked descriptor handle %llu of type %d", handle.ptr, type);
+    log("Attempted to release untracked descriptor handle %llu", handle.ptr);
 }
 
 UINT DescHeapMgr::handleSize(D3D12_DESCRIPTOR_HEAP_TYPE type) const
@@ -216,6 +259,8 @@ struct App
     IDXGIFactory3 *m_dxgiFactory = nullptr;
     IDXGIAdapter3 *m_adapter = nullptr;
     ID3D12Device *m_device = nullptr;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS m_features = {};
+    D3D12_FEATURE_DATA_ARCHITECTURE m_archFeatures = {};
     ID3D12CommandQueue *m_cmdQueue = nullptr;
     IDXGISwapChain3 *m_swapchain = nullptr;
     UINT m_currentFrameSlot; // 0..SWAPCHAIN_BUFFER_COUNT-1
@@ -267,6 +312,9 @@ void App::waitForFrameFence()
 
 void App::waitGpu()
 {
+    if (!m_cmdQueue)
+        return;
+
     bumpFrameFence();
     waitForFrameFence();
 }
@@ -337,17 +385,19 @@ ID3D12Resource *App::createDepthStencil(D3D12_CPU_DESCRIPTOR_HANDLE dsv, int wid
 
 bool App::createSwapchainViews()
 {
+    D3D12_CPU_DESCRIPTOR_HANDLE firstRtv = m_descHeapMgr.allocate(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, SWAPCHAIN_BUFFER_COUNT);
+    const UINT rtvStride = m_descHeapMgr.handleSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
     for (int i = 0; i < SWAPCHAIN_BUFFER_COUNT; ++i) {
         HRESULT hr = m_swapchain->GetBuffer(i, IID_ID3D12Resource, reinterpret_cast<void **>(&m_rt[i]));
         if (FAILED(hr)) {
             logHr("Failed to get swapchain buffer", hr);
             return false;
         }
-        m_rtv[i] = m_descHeapMgr.allocate(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        m_rtv[i].ptr = firstRtv.ptr + SIZE_T(i) * rtvStride;
         m_device->CreateRenderTargetView(m_rt[i], nullptr, m_rtv[i]);
     }
 
-    m_dsv = m_descHeapMgr.allocate(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    m_dsv = m_descHeapMgr.allocate(D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 1);
     m_ds = createDepthStencil(m_dsv, m_width, m_height, 1);
     if (!m_ds)
         return false;
@@ -362,7 +412,7 @@ void App::releaseSwapchainViews()
         m_ds = nullptr;
     }
     if (m_dsv.ptr) {
-        m_descHeapMgr.release(m_dsv, D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+        m_descHeapMgr.release(m_dsv, 1);
         m_dsv.ptr = 0;
     }
     for (int i = 0; i < SWAPCHAIN_BUFFER_COUNT; ++i) {
@@ -371,7 +421,7 @@ void App::releaseSwapchainViews()
             m_rt[i] = nullptr;
         }
         if (m_rtv[i].ptr) {
-            m_descHeapMgr.release(m_rtv[i], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+            m_descHeapMgr.release(m_rtv[i], 1);
             m_rtv[i].ptr = 0;
         }
     }
@@ -420,12 +470,26 @@ bool App::initialize()
         }
     }
 
-    hr = D3D12CreateDevice(adapterToUse, D3D_FEATURE_LEVEL_12_0, IID_ID3D12Device, reinterpret_cast<void **>(&m_device));
+    hr = D3D12CreateDevice(adapterToUse, FEATURE_LEVEL, IID_ID3D12Device, reinterpret_cast<void **>(&m_device));
     adapterToUse->Release();
     if (FAILED(hr)) {
         logHr("Failed to create D3D12 device", hr);
         return false;
     }
+
+    hr = m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &m_features, sizeof(m_features));
+    if (FAILED(hr)) {
+        logHr("Failed to query device options", hr);
+        return false;
+    }
+    hr = m_device->CheckFeatureSupport(D3D12_FEATURE_ARCHITECTURE, &m_archFeatures, sizeof(m_archFeatures));
+    if (FAILED(hr)) {
+        logHr("Failed to query arch features", hr);
+        return false;
+    }
+    log("Resource binding tier: %d Resource heap tier: %d Tile-based: %d UMA: %d CacheCoherentUMA: %d",
+        m_features.ResourceBindingTier, m_features.ResourceHeapTier,
+        m_archFeatures.TileBasedRenderer, m_archFeatures.UMA, m_archFeatures.CacheCoherentUMA);
 
     D3D12_COMMAND_QUEUE_DESC queueDesc = {};
     queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -721,7 +785,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         const float clearColor[] = { 0.0f, 1.0f, 0.0f, 1.0f };
         app.m_drawCmdList->ClearRenderTargetView(app.m_rtv[app.m_currentFrameSlot], clearColor, 0, nullptr);
         app.m_drawCmdList->ClearDepthStencilView(app.m_dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-        //app.requestUpdate();
+        app.requestUpdate();
     });
 
     MSG msg = {};

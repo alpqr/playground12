@@ -118,8 +118,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescHeapMgr::allocate(D3D12_DESCRIPTOR_HEAP_TYPE typ
                         const UINT bucket = pos / DESCRIPTORS_PER_BUCKET;
                         const UINT indexInBucket = pos - bucket * DESCRIPTORS_PER_BUCKET;
                         heap.freeMap[bucket] &= ~(1UL << indexInBucket);
-                        log("reserve descriptor handle, heap %p type %x bucket %u index %u",
-                            &heap, type, bucket, indexInBucket);
+                        //log("reserve descriptor handle, heap %p type %x bucket %u index %u",
+                        //    &heap, type, bucket, indexInBucket);
                     }
                     h.ptr = heap.start.ptr + SIZE_T(freePos) * heap.handleSize;
                     return h;
@@ -147,7 +147,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescHeapMgr::allocate(D3D12_DESCRIPTOR_HEAP_TYPE typ
     }
 
     heap.start = heap.heap->GetCPUDescriptorHandleForHeapStart();
-    log("new descriptor heap, type %x, start %llu", type, heap.start.ptr);
+    //log("new descriptor heap, type %x, start %llu", type, heap.start.ptr);
 
     for (int i = 0; i < _countof(heap.freeMap); ++i)
         heap.freeMap[i] = 0xFFFFFFFF;
@@ -179,8 +179,8 @@ void DescHeapMgr::release(D3D12_CPU_DESCRIPTOR_HANDLE handle, UINT n)
                 const UINT bucket = UINT(pos) / DESCRIPTORS_PER_BUCKET;
                 const UINT indexInBucket = UINT(pos) - bucket * DESCRIPTORS_PER_BUCKET;
                 heap.freeMap[bucket] |= 1UL << indexInBucket;
-                log("free descriptor handle, heap %p type %x bucket %u index %u",
-                    &heap, heap.type, bucket, indexInBucket);
+                //log("free descriptor handle, heap %p type %x bucket %u index %u",
+                //    &heap, heap.type, bucket, indexInBucket);
             }
             return;
         }
@@ -250,6 +250,8 @@ struct App
     void maybeUpdate() { if (m_needsRender) render(); }
     using BuildCmdListFunc = std::function<void()>;
     void addCmdListBuilder(BuildCmdListFunc f) { m_buildCmdListFuncs.push_back(f); }
+    using ReleaseResourcesFunc = std::function<void()>;
+    void addReleaseResources(ReleaseResourcesFunc f) { m_relResFuncs.push_back(f); }
 
     HINSTANCE m_hInstance;
     HWND m_hWnd = 0;
@@ -278,6 +280,7 @@ struct App
     bool m_needsRender = false;
     Timestamp m_renderTimestamp;
     std::vector<BuildCmdListFunc> m_buildCmdListFuncs;
+    std::vector<ReleaseResourcesFunc> m_relResFuncs;
 };
 
 void App::logVidMemUsage()
@@ -561,6 +564,9 @@ void App::releaseResources()
 {
     waitGpu();
 
+    for (ReleaseResourcesFunc f : m_relResFuncs)
+        f();
+
     if (m_drawCmdList) {
         m_drawCmdList->Release();
         m_drawCmdList = nullptr;
@@ -644,8 +650,7 @@ void App::resize(int newWidth, int newHeight)
 void App::handleLostDevice()
 {
     releaseResources();
-    m_needsRender = false;
-    // ###
+    requestUpdate();
 }
 
 void App::beginFrame()
@@ -699,12 +704,55 @@ void App::render()
 
     log("render (elapsed since last: %lld ms)", m_renderTimestamp.restart());
 
+    if (!m_device) {
+        if (!initialize()) {
+            releaseResources();
+            return;
+        }
+    }
+
     beginFrame();
 
     for (BuildCmdListFunc f : m_buildCmdListFuncs)
         f();
 
     endFrame();
+}
+
+struct DefaultRtInit
+{
+    DefaultRtInit(App *app) : m_app(app) { }
+    void buildCmdList();
+    App *m_app;
+};
+
+void DefaultRtInit::buildCmdList()
+{
+    ID3D12GraphicsCommandList *cmdList = m_app->m_drawCmdList;
+    D3D12_CPU_DESCRIPTOR_HANDLE *rtv = &m_app->m_rtv[m_app->m_currentFrameSlot];
+    cmdList->OMSetRenderTargets(1, rtv, false, &m_app->m_dsv);
+    const float clearColor[] = { 0.0f, 1.0f, 0.0f, 1.0f };
+    cmdList->ClearRenderTargetView(*rtv, clearColor, 0, nullptr);
+    cmdList->ClearDepthStencilView(m_app->m_dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
+}
+
+struct SomethingRenderer
+{
+    SomethingRenderer(App *app) : m_app(app) { }
+    void buildCmdList();
+    void releaseResources();
+    App *m_app;
+};
+
+void SomethingRenderer::buildCmdList()
+{
+    // ID3D12GraphicsCommandList *cmdList = m_app->m_drawCmdList;
+
+    // ###
+}
+
+void SomethingRenderer::releaseResources()
+{
 }
 
 static App *g_app;
@@ -775,18 +823,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     App app(hInstance, window);
     g_app = &app;
 
-    if (!app.initialize()) {
-        app.releaseResources();
-        return EXIT_FAILURE;
-    }
+    DefaultRtInit rtInit(&app);
+    app.addCmdListBuilder(std::bind(&DefaultRtInit::buildCmdList, &rtInit));
 
-    app.addCmdListBuilder([&app] {
-        app.m_drawCmdList->OMSetRenderTargets(1, &app.m_rtv[app.m_currentFrameSlot], false, &app.m_dsv);
-        const float clearColor[] = { 0.0f, 1.0f, 0.0f, 1.0f };
-        app.m_drawCmdList->ClearRenderTargetView(app.m_rtv[app.m_currentFrameSlot], clearColor, 0, nullptr);
-        app.m_drawCmdList->ClearDepthStencilView(app.m_dsv, D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL, 1.0f, 0, 0, nullptr);
-        app.requestUpdate();
-    });
+    SomethingRenderer tri(&app);
+    app.addCmdListBuilder(std::bind(&SomethingRenderer::buildCmdList, &tri));
+    app.addReleaseResources(std::bind(&SomethingRenderer::releaseResources, &tri));
+
+    app.addCmdListBuilder([&app] { app.requestUpdate(); });
 
     MSG msg = {};
     while (msg.message != WM_QUIT) {

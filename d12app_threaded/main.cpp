@@ -910,7 +910,6 @@ App::~App()
         b->finish();
         delete b;
     }
-    m_builders.clear();
     for (HANDLE event : m_waitEvents)
         CloseHandle(event);
     g_app = nullptr;
@@ -918,8 +917,13 @@ App::~App()
 
 void App::addBuilder(Builder *b)
 {
-    m_builders.push_back(b);
-    b->start();
+    if (m_builders.size() < MAXIMUM_WAIT_OBJECTS) {
+        m_builders.push_back(b);
+        b->start();
+    } else {
+        log("Too many command list builders (max is %d)", MAXIMUM_WAIT_OBJECTS);
+        delete b;
+    }
 }
 
 void App::addBuilders(std::initializer_list<Builder *> args)
@@ -941,16 +945,16 @@ void App::deleteBuilder(Builder *b)
 
 void App::postToAllBuildersAndWait(Builder::Event e)
 {
-    const size_t count = m_builders.size();
-    const size_t eventsToResetCount = m_waitEvents.size();
-    m_waitEvents.resize(count);
-    for (size_t i = 0; i < eventsToResetCount; ++i)
-        ResetEvent(m_waitEvents[i]);
-    for (size_t i = eventsToResetCount; i < count; ++i)
-        m_waitEvents[i] = CreateEvent(nullptr, false, false, nullptr);
-    for (size_t i = 0; i < count; ++i)
+    const size_t existingSize = m_waitEvents.size();
+    const size_t size = m_builders.size();
+    if (size > existingSize) {
+        m_waitEvents.resize(size);
+        for (size_t i = existingSize; i < size; ++i)
+            m_waitEvents[i] = CreateEvent(nullptr, false, false, nullptr);
+    }
+    for (size_t i = 0; i < size; ++i)
         m_builders[i]->postEvent(e, m_waitEvents[i]);
-    WaitForMultipleObjects(count, m_waitEvents.data(), true, INFINITE);
+    WaitForMultipleObjects(size, m_waitEvents.data(), true, INFINITE);
 }
 
 struct BldDefaultRtInit : public Builder

@@ -1,9 +1,8 @@
 #include "builder.h"
 #include "app.h"
 
-Builder::Builder(App *app)
-    : m_app(app),
-      m_type(app->builderType())
+Builder::Builder()
+    : m_type(g_app->builderType())
 {
     if (m_type == Type::Threaded)
         m_msgEvent = CreateEvent(nullptr, false, false, nullptr);
@@ -54,7 +53,7 @@ void Builder::postEvent(Event e, HANDLE waitEvent)
 bool Builder::initializeBaseResources()
 {
     for (int i = 0; i < FRAMES_IN_FLIGHT; ++i) {
-        HRESULT hr = m_app->m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator,
+        HRESULT hr = g_app->m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_ID3D12CommandAllocator,
             reinterpret_cast<void **>(&m_cmdAllocator[i]));
         if (FAILED(hr)) {
             logHr("Failed to create command allocator", hr);
@@ -62,7 +61,7 @@ bool Builder::initializeBaseResources()
         }
     }
 
-    HRESULT hr = m_app->m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+    HRESULT hr = g_app->m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
         m_cmdAllocator[0], nullptr, IID_ID3D12GraphicsCommandList,
         reinterpret_cast<void **>(&m_drawCmdList));
     if (FAILED(hr)) {
@@ -118,8 +117,8 @@ void Builder::invokeProcessEvent(const ThreadMessage &e)
                 return;
             }
         }
-        m_cmdAllocator[m_app->m_currentFrameSlot]->Reset();
-        m_drawCmdList->Reset(m_cmdAllocator[m_app->m_currentFrameSlot], nullptr);
+        m_cmdAllocator[g_app->m_currentFrameSlot]->Reset();
+        m_drawCmdList->Reset(m_cmdAllocator[g_app->m_currentFrameSlot], nullptr);
     }
     processEvent(e.first);
     if (e.first == Event::ReleaseResources)

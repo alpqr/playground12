@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <assert.h>
 #include <vector>
 #include <functional>
 #include <algorithm>
@@ -20,15 +21,7 @@
 #include <thread>
 #include <mutex>
 
-void log(const char *fmt, ...);
-void logHr(const char *msg, HRESULT hr);
-
-template<typename Int>
-inline Int aligned(Int v, Int byteAlign)
-{
-    return (v + byteAlign - 1) & ~(byteAlign - 1);
-}
-
+const bool MULTITHREADED = true;
 const D3D_FEATURE_LEVEL FEATURE_LEVEL = D3D_FEATURE_LEVEL_11_0;
 const UINT DEFAULT_WIDTH = 1280;
 const UINT DEFAULT_HEIGHT = 720;
@@ -39,7 +32,20 @@ const bool ENABLE_DEBUG_LAYER = true;
 const int ADAPTER_INDEX = -1;
 const UINT PRESENT_SYNC_INTERVAL = 1;
 
+void log(const char *fmt, ...);
+void logHr(const char *msg, HRESULT hr);
+
+template<typename Int>
+inline Int aligned(Int v, Int byteAlign)
+{
+    return (v + byteAlign - 1) & ~(byteAlign - 1);
+}
+
 struct App;
 extern App *g_app;
+
+struct Builder;
+using BuilderList = std::vector<Builder *>;
+using BuilderTable = std::vector<BuilderList>;
 
 #endif

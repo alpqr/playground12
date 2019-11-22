@@ -106,4 +106,4 @@ ID3D12Resource *createBuffer(ID3D12Device *dev, Storage type, UINT64 size)
     return buf;
 }
 
-}
+} // namespace

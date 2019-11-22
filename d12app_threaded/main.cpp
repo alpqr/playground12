@@ -64,8 +64,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     ShowWindow(window, nCmdShow);
 
-    App app(hInstance, window, Builder::Type::Threaded);
-    registerDrawCmdListBuilders();
+    App app(hInstance, window, MULTITHREADED ? Builder::Type::Threaded : Builder::Type::NonThreaded);
+    BuilderHost bldHost;
+    app.setFrameFunc(std::bind(&BuilderHost::frameFunc, &bldHost));
     app.addPostFrameFunc([&app] { app.requestUpdate(); });
 
     MSG msg = {};

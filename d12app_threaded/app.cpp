@@ -86,6 +86,10 @@ void App::releaseSwapchainViews()
 
 bool App::initialize()
 {
+    log("App::initialize() Threaded command list building: %s Forced adapter index: %d Sync interval: %d Debug layer: %s",
+        m_builderType == Builder::Type::Threaded ? "yes" : "no",
+        ADAPTER_INDEX, PRESENT_SYNC_INTERVAL, ENABLE_DEBUG_LAYER ? "yes" : "no");
+
     HRESULT hr = CreateDXGIFactory2(0, IID_IDXGIFactory2, reinterpret_cast<void **>(&m_dxgiFactory));
     if (FAILED(hr)) {
         logHr("Failed to create DXGI factory", hr);
@@ -317,7 +321,7 @@ void App::beginFrame()
 
     m_cmdAllocator[m_currentFrameSlot]->Reset();
 
-    for (FrameFunc f : m_preFrameFuncs)
+    for (FrameExtraFunc f : m_preFrameFuncs)
         f();
 
     m_mainThreadDrawCmdList[0]->Reset(m_cmdAllocator[m_currentFrameSlot], nullptr);
@@ -331,7 +335,7 @@ void App::beginFrame()
     m_mainThreadDrawCmdList[0]->Close();
 }
 
-void App::endFrame()
+void App::endFrame(const BuilderTable *bldTab)
 {
     m_mainThreadDrawCmdList[1]->Reset(m_cmdAllocator[m_currentFrameSlot], nullptr);
     D3D12_RESOURCE_BARRIER rtBarrier = {};
@@ -343,13 +347,27 @@ void App::endFrame()
     m_mainThreadDrawCmdList[1]->ResourceBarrier(1, &rtBarrier);
     m_mainThreadDrawCmdList[1]->Close();
 
-    const size_t builderCount = m_builders.size();
-    m_cmdListBatch.resize(2 + builderCount);
-    m_cmdListBatch[0] = m_mainThreadDrawCmdList[0];
-    for (size_t i = 0; i < builderCount; ++i)
-        m_cmdListBatch[i + 1] = m_builders[i]->commandList();
-    m_cmdListBatch[1 + builderCount] = m_mainThreadDrawCmdList[1];
-    m_cmdQueue->ExecuteCommandLists(m_cmdListBatch.size(), m_cmdListBatch.data());
+    size_t bldTotal = 0;
+    if (bldTab) {
+        for (const BuilderList &bldList : *bldTab)
+            bldTotal += bldList.size();
+    }
+    const size_t cmdListCount = 2 + bldTotal;
+    if (m_cmdListBatch.size() < cmdListCount)
+        m_cmdListBatch.resize(cmdListCount);
+
+    size_t batchPos = 0;
+    m_cmdListBatch[batchPos++] = m_mainThreadDrawCmdList[0];
+    if (bldTab) {
+        for (const BuilderList &bldList : *bldTab) {
+            for (Builder *b : bldList)
+                m_cmdListBatch[batchPos++] = b->commandList();
+        }
+    }
+    m_cmdListBatch[batchPos++] = m_mainThreadDrawCmdList[1];
+    assert(batchPos == cmdListCount);
+
+    m_cmdQueue->ExecuteCommandLists(cmdListCount, m_cmdListBatch.data());
 
     HRESULT hr = m_swapchain->Present(PRESENT_SYNC_INTERVAL, 0);
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -363,7 +381,7 @@ void App::endFrame()
     bumpFrameFence();
     m_currentFrameSlot = m_swapchain->GetCurrentBackBufferIndex();
 
-    for (FrameFunc f : m_postFrameFuncs)
+    for (FrameExtraFunc f : m_postFrameFuncs)
         f();
 }
 
@@ -383,10 +401,13 @@ void App::render()
     }
 
     beginFrame();
-
-    postToAllBuildersAndWait(Builder::Event::Build);
-
-    endFrame();
+    const BuilderTable *bldTab = nullptr;
+    if (m_frameFunc) {
+        bldTab = m_frameFunc();
+        if (bldTab)
+            postToBuildersAndWait(Builder::Event::Build, *bldTab);
+    }
+    endFrame(bldTab);
 }
 
 App *g_app = nullptr;
@@ -412,17 +433,9 @@ App::~App()
 
 void App::addBuilder(Builder *b)
 {
-    if (b->type() != m_builderType) {
-        log("Bad builder type %d", int(m_builderType));
-        return;
-    }
-    if (m_builders.size() < MAXIMUM_WAIT_OBJECTS) {
-        m_builders.push_back(b);
-        b->start();
-    } else {
-        log("Too many command list builders (max is %d)", MAXIMUM_WAIT_OBJECTS);
-        delete b;
-    }
+    assert(b->type() == m_builderType);
+    m_builders.push_back(b);
+    b->start();
 }
 
 void App::addBuilders(std::initializer_list<Builder *> args)
@@ -444,19 +457,33 @@ void App::deleteBuilder(Builder *b)
 
 void App::postToAllBuildersAndWait(Builder::Event e)
 {
+    postToBuildersAndWait(e, m_builders);
+}
+
+void App::postToBuildersAndWait(Builder::Event e, const BuilderTable &bldTab)
+{
+    for (const BuilderList &bldList : bldTab)
+        postToBuildersAndWait(e, bldList);
+}
+
+void App::postToBuildersAndWait(Builder::Event e, const BuilderList &builders)
+{
     if (m_builderType == Builder::Type::Threaded) {
+        const size_t builderCount = builders.size();
+        const size_t batchSize = min(builderCount, MAXIMUM_WAIT_OBJECTS);
         const size_t existingSize = m_waitEvents.size();
-        const size_t size = m_builders.size();
-        if (size > existingSize) {
-            m_waitEvents.resize(size);
-            for (size_t i = existingSize; i < size; ++i)
+        if (batchSize > existingSize) {
+            m_waitEvents.resize(batchSize);
+            for (size_t i = existingSize; i < batchSize; ++i)
                 m_waitEvents[i] = CreateEvent(nullptr, false, false, nullptr);
         }
-        for (size_t i = 0; i < size; ++i)
-            m_builders[i]->postEvent(e, m_waitEvents[i]);
-        WaitForMultipleObjects(size, m_waitEvents.data(), true, INFINITE);
+        for (size_t batchStart = 0; batchStart < builderCount; batchStart += batchSize) {
+            for (size_t i = 0; i < batchSize; ++i)
+                builders[batchStart + i]->postEvent(e, m_waitEvents[i]);
+            WaitForMultipleObjects(batchSize, m_waitEvents.data(), true, INFINITE);
+        }
     } else {
-        for (Builder *b : m_builders)
+        for (Builder *b : builders)
             b->postEvent(e);
     }
 }

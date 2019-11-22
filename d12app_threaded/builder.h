@@ -15,7 +15,7 @@ struct Builder
         ReleaseResources
     };
 
-    Builder(App *app);
+    Builder();
     virtual ~Builder();
 
     Type type() const { return m_type; }
@@ -28,7 +28,6 @@ protected:
     virtual void processEvent(Event e) = 0;
 
     Type m_type;
-    App *m_app;
     bool m_started = false;
     HANDLE m_msgEvent;
     std::mutex m_msgMutex;

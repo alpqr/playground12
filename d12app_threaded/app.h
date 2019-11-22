@@ -24,7 +24,7 @@ struct App
     void releaseSwapchainViews();
     void handleLostDevice();
     void beginFrame();
-    void endFrame();
+    void endFrame(const BuilderTable *bldTab);
 
     void requestUpdate() { m_needsRender = true; }
     void maybeUpdate() { if (m_needsRender) render(); }
@@ -35,10 +35,15 @@ struct App
     void deleteBuilder(Builder *b);
 
     void postToAllBuildersAndWait(Builder::Event e);
+    void postToBuildersAndWait(Builder::Event e, const BuilderTable &bldTab);
+    void postToBuildersAndWait(Builder::Event e, const BuilderList &builders);
 
-    using FrameFunc = std::function<void()>;
-    void addPreFrameFunc(FrameFunc f) { m_preFrameFuncs.push_back(f); }
-    void addPostFrameFunc(FrameFunc f) { m_postFrameFuncs.push_back(f); }
+    using FrameFunc = std::function<const BuilderTable *()>;
+    void setFrameFunc(FrameFunc f) { m_frameFunc = f; }
+
+    using FrameExtraFunc = std::function<void()>;
+    void addPreFrameFunc(FrameExtraFunc f) { m_preFrameFuncs.push_back(f); }
+    void addPostFrameFunc(FrameExtraFunc f) { m_postFrameFuncs.push_back(f); }
 
     HINSTANCE m_hInstance;
     HWND m_hWnd;
@@ -67,11 +72,12 @@ struct App
     ID3D12GraphicsCommandList *m_mainThreadDrawCmdList[2] = {};
     bool m_needsRender = false;
     Timestamp m_renderTimestamp;
-    std::vector<Builder *> m_builders;
+    BuilderList m_builders;
     std::vector<HANDLE> m_waitEvents;
     std::vector<ID3D12CommandList *> m_cmdListBatch;
-    std::vector<FrameFunc> m_preFrameFuncs;
-    std::vector<FrameFunc> m_postFrameFuncs;
+    std::vector<FrameExtraFunc> m_preFrameFuncs;
+    std::vector<FrameExtraFunc> m_postFrameFuncs;
+    FrameFunc m_frameFunc = nullptr;
 };
 
 #endif

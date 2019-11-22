@@ -3,12 +3,18 @@
 
 #include "builder.h"
 
-void registerDrawCmdListBuilders();
-
 struct BldDefaultRtInit : public Builder
 {
-    BldDefaultRtInit() : Builder(g_app) { }
     void processEvent(Event e) override;
+};
+
+struct BuilderHost
+{
+    BuilderHost();
+    const BuilderTable *frameFunc();
+
+    BuilderTable bldTab;
+    BldDefaultRtInit *defaultRtInit;
 };
 
 #endif

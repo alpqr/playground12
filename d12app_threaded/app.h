@@ -8,7 +8,7 @@
 
 struct App
 {
-    App(HINSTANCE hInstance, HWND hWnd);
+    App(HINSTANCE hInstance, HWND hWnd, Builder::Type builderType = Builder::Type::Threaded);
     ~App();
 
     bool initialize();
@@ -29,6 +29,7 @@ struct App
     void requestUpdate() { m_needsRender = true; }
     void maybeUpdate() { if (m_needsRender) render(); }
 
+    Builder::Type builderType() const { return m_builderType; }
     void addBuilder(Builder *b);
     void addBuilders(std::initializer_list<Builder *> args);
     void deleteBuilder(Builder *b);
@@ -40,7 +41,8 @@ struct App
     void addPostFrameFunc(FrameFunc f) { m_postFrameFuncs.push_back(f); }
 
     HINSTANCE m_hInstance;
-    HWND m_hWnd = 0;
+    HWND m_hWnd;
+    Builder::Type m_builderType;
     UINT m_width = DEFAULT_WIDTH;
     UINT m_height = DEFAULT_HEIGHT;
     bool m_zeroSize = false;

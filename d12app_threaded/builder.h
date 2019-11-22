@@ -5,6 +5,10 @@
 
 struct Builder
 {
+    enum class Type {
+        Threaded,
+        NonThreaded
+    };
     enum class Event {
         Finish,
         Build,
@@ -14,21 +18,18 @@ struct Builder
     Builder(App *app);
     virtual ~Builder();
 
-    bool isStarted() const { return m_thread != nullptr; }
+    Type type() const { return m_type; }
+    bool isStarted() const { return m_started; }
     void postEvent(Event e, HANDLE waitEvent = nullptr);
 
     ID3D12CommandList *commandList() const { return m_drawCmdList; }
 
 protected:
-    void start();
-    void finish();
-    void run();
-    bool initializeBaseResources();
-    void releaseBaseResources();
-
     virtual void processEvent(Event e) = 0;
 
+    Type m_type;
     App *m_app;
+    bool m_started = false;
     HANDLE m_msgEvent;
     std::mutex m_msgMutex;
     std::thread *m_thread = nullptr;
@@ -37,6 +38,13 @@ protected:
     ID3D12CommandAllocator *m_cmdAllocator[FRAMES_IN_FLIGHT] = {};
     ID3D12GraphicsCommandList *m_drawCmdList = nullptr;
 
+private:
+    void start();
+    void finish();
+    void run();
+    void invokeProcessEvent(const ThreadMessage &e);
+    bool initializeBaseResources();
+    void releaseBaseResources();
     friend struct App;
 };
 

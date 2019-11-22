@@ -2,42 +2,53 @@
 #include "app.h"
 
 Builder::Builder(App *app)
-    : m_app(app)
+    : m_app(app),
+      m_type(app->builderType())
 {
-    m_msgEvent = CreateEvent(nullptr, false, false, nullptr);
+    if (m_type == Type::Threaded)
+        m_msgEvent = CreateEvent(nullptr, false, false, nullptr);
 }
 
 Builder::~Builder()
 {
-    CloseHandle(m_msgEvent);
+    if (m_type == Type::Threaded)
+        CloseHandle(m_msgEvent);
 }
 
 void Builder::start()
 {
     if (isStarted())
         return;
-
-    m_thread = new std::thread(std::bind(&Builder::run, this));
+    if (m_type == Type::Threaded)
+        m_thread = new std::thread(std::bind(&Builder::run, this));
+    m_started = true;
 }
 
 void Builder::finish()
 {
     if (!isStarted())
         return;
-
     postEvent(Event::Finish);
-    m_thread->join();
-    delete m_thread;
-    m_thread = nullptr;
+    if (m_type == Type::Threaded) {
+        m_thread->join();
+        delete m_thread;
+        m_thread = nullptr;
+    }
+    m_started = false;
 }
 
 void Builder::postEvent(Event e, HANDLE waitEvent)
 {
-    {
-        std::lock_guard<std::mutex> lock(m_msgMutex);
-        m_events.push_back(std::make_pair(e, waitEvent));
+    if (m_type == Type::Threaded) {
+        {
+            std::lock_guard<std::mutex> lock(m_msgMutex);
+            m_events.push_back(std::make_pair(e, waitEvent));
+        }
+        SetEvent(m_msgEvent);
+    } else {
+        const ThreadMessage msg = std::make_pair(e, nullptr);
+        invokeProcessEvent(msg);
     }
-    SetEvent(m_msgEvent);
 }
 
 bool Builder::initializeBaseResources()
@@ -80,6 +91,7 @@ void Builder::releaseBaseResources()
 
 void Builder::run()
 {
+    assert(m_type == Type::Threaded);
     for (; ;) {
         WaitForSingleObject(m_msgEvent, INFINITE);
 
@@ -90,23 +102,28 @@ void Builder::run()
         for (const ThreadMessage &e : events) {
             if (e.first == Event::Finish)
                 return;
-            if (e.first == Event::Build) {
-                if (!m_drawCmdList) {
-                    if (!initializeBaseResources()) {
-                        releaseBaseResources();
-                        continue;
-                    }
-                }
-                m_cmdAllocator[m_app->m_currentFrameSlot]->Reset();
-                m_drawCmdList->Reset(m_cmdAllocator[m_app->m_currentFrameSlot], nullptr);
-            }
-            processEvent(e.first);
-            if (e.first == Event::ReleaseResources)
-                releaseBaseResources();
-            else if (e.first == Event::Build)
-                m_drawCmdList->Close();
+            invokeProcessEvent(e);
             if (e.second)
                 SetEvent(e.second);
         }
     }
+}
+
+void Builder::invokeProcessEvent(const ThreadMessage &e)
+{
+    if (e.first == Event::Build) {
+        if (!m_drawCmdList) {
+            if (!initializeBaseResources()) {
+                releaseBaseResources();
+                return;
+            }
+        }
+        m_cmdAllocator[m_app->m_currentFrameSlot]->Reset();
+        m_drawCmdList->Reset(m_cmdAllocator[m_app->m_currentFrameSlot], nullptr);
+    }
+    processEvent(e.first);
+    if (e.first == Event::ReleaseResources)
+        releaseBaseResources();
+    else if (e.first == Event::Build)
+        m_drawCmdList->Close();
 }

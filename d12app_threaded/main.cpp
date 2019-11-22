@@ -64,7 +64,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     ShowWindow(window, nCmdShow);
 
-    App app(hInstance, window);
+    App app(hInstance, window, Builder::Type::Threaded);
     registerDrawCmdListBuilders();
     app.addPostFrameFunc([&app] { app.requestUpdate(); });
 

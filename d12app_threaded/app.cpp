@@ -391,9 +391,10 @@ void App::render()
 
 App *g_app = nullptr;
 
-App::App(HINSTANCE hInstance, HWND hWnd)
+App::App(HINSTANCE hInstance, HWND hWnd, Builder::Type builderType)
     : m_hInstance(hInstance),
-    m_hWnd(hWnd)
+      m_hWnd(hWnd),
+      m_builderType(builderType)
 {
     g_app = this;
 }
@@ -411,6 +412,10 @@ App::~App()
 
 void App::addBuilder(Builder *b)
 {
+    if (b->type() != m_builderType) {
+        log("Bad builder type %d", int(m_builderType));
+        return;
+    }
     if (m_builders.size() < MAXIMUM_WAIT_OBJECTS) {
         m_builders.push_back(b);
         b->start();
@@ -439,14 +444,19 @@ void App::deleteBuilder(Builder *b)
 
 void App::postToAllBuildersAndWait(Builder::Event e)
 {
-    const size_t existingSize = m_waitEvents.size();
-    const size_t size = m_builders.size();
-    if (size > existingSize) {
-        m_waitEvents.resize(size);
-        for (size_t i = existingSize; i < size; ++i)
-            m_waitEvents[i] = CreateEvent(nullptr, false, false, nullptr);
+    if (m_builderType == Builder::Type::Threaded) {
+        const size_t existingSize = m_waitEvents.size();
+        const size_t size = m_builders.size();
+        if (size > existingSize) {
+            m_waitEvents.resize(size);
+            for (size_t i = existingSize; i < size; ++i)
+                m_waitEvents[i] = CreateEvent(nullptr, false, false, nullptr);
+        }
+        for (size_t i = 0; i < size; ++i)
+            m_builders[i]->postEvent(e, m_waitEvents[i]);
+        WaitForMultipleObjects(size, m_waitEvents.data(), true, INFINITE);
+    } else {
+        for (Builder *b : m_builders)
+            b->postEvent(e);
     }
-    for (size_t i = 0; i < size; ++i)
-        m_builders[i]->postEvent(e, m_waitEvents[i]);
-    WaitForMultipleObjects(size, m_waitEvents.data(), true, INFINITE);
 }

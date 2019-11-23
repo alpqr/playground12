@@ -28,6 +28,13 @@ static LRESULT CALLBACK windowProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lP
             g_app->resize(newWidth, newHeight);
     }
         return 0;
+
+    case WM_MBUTTONDOWN:
+        if (g_app) {
+            log("Simulating graphics device loss");
+            g_app->handleLostDevice();
+        }
+        return 0;
     }
 
     return DefWindowProc(hWnd, msg, wParam, lParam);
@@ -64,9 +71,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
 
     ShowWindow(window, nCmdShow);
 
-    App app(hInstance, window, MULTITHREADED ? Builder::Type::Threaded : Builder::Type::NonThreaded);
+    App app(hInstance, window, MULTITHREADED ? Builder::ThreadModel::Threaded : Builder::ThreadModel::NonThreaded);
     BuilderHost bldHost;
-    app.setFrameFunc(std::bind(&BuilderHost::frameFunc, &bldHost));
+    app.setFrameFunc(std::bind(&BuilderHost::frame, &bldHost));
+    app.addReleaseResourcesFunc(std::bind(&BuilderHost::releaseResourcesNotify, &bldHost));
     app.addPostFrameFunc([&app] { app.requestUpdate(); });
 
     MSG msg = {};

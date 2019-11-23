@@ -87,7 +87,7 @@ void App::releaseSwapchainViews()
 bool App::initialize()
 {
     log("App::initialize() Threaded command list building: %s Forced adapter index: %d Sync interval: %d Debug layer: %s",
-        m_builderType == Builder::Type::Threaded ? "yes" : "no",
+        m_threadModel == Builder::ThreadModel::Threaded ? "yes" : "no",
         ADAPTER_INDEX, PRESENT_SYNC_INTERVAL, ENABLE_DEBUG_LAYER ? "yes" : "no");
 
     HRESULT hr = CreateDXGIFactory2(0, IID_IDXGIFactory2, reinterpret_cast<void **>(&m_dxgiFactory));
@@ -192,6 +192,8 @@ bool App::initialize()
         return false;
     }
     m_frameFenceEvent = CreateEvent(nullptr, false, false, nullptr);
+    for (int i = 0; i < SWAPCHAIN_BUFFER_COUNT; ++i)
+        m_frameFenceValues[i] = 0;
 
     m_dxgiFactory->MakeWindowAssociation(m_hWnd, DXGI_MWA_NO_ALT_ENTER);
 
@@ -212,7 +214,7 @@ bool App::initialize()
         hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_cmdAllocator[0], nullptr, IID_ID3D12GraphicsCommandList,
             reinterpret_cast<void **>(&m_mainThreadDrawCmdList[i]));
         if (FAILED(hr)) {
-            log("Failed to create graphics command list", hr);
+            logHr("Failed to create graphics command list", hr);
             return false;
         }
         m_mainThreadDrawCmdList[i]->Close();
@@ -224,6 +226,9 @@ bool App::initialize()
 void App::releaseResources()
 {
     waitGpu();
+
+    for (ReleaseResourcesFunc f : m_releaseResourcesFuncs)
+        f();
 
     postToAllBuildersAndWait(Builder::Event::ReleaseResources);
 
@@ -349,8 +354,12 @@ void App::endFrame(const BuilderTable *bldTab)
 
     size_t bldTotal = 0;
     if (bldTab) {
-        for (const BuilderList &bldList : *bldTab)
-            bldTotal += bldList.size();
+        for (const BuilderList &bldList : *bldTab) {
+            for (Builder *b : bldList) {
+                if (b->commandList())
+                    ++bldTotal;
+            }
+        }
     }
     const size_t cmdListCount = 2 + bldTotal;
     if (m_cmdListBatch.size() < cmdListCount)
@@ -360,12 +369,14 @@ void App::endFrame(const BuilderTable *bldTab)
     m_cmdListBatch[batchPos++] = m_mainThreadDrawCmdList[0];
     if (bldTab) {
         for (const BuilderList &bldList : *bldTab) {
-            for (Builder *b : bldList)
-                m_cmdListBatch[batchPos++] = b->commandList();
+            for (Builder *b : bldList) {
+                ID3D12CommandList *cmdList = b->commandList();
+                if (cmdList)
+                    m_cmdListBatch[batchPos++] = cmdList;
+            }
         }
     }
     m_cmdListBatch[batchPos++] = m_mainThreadDrawCmdList[1];
-    assert(batchPos == cmdListCount);
 
     m_cmdQueue->ExecuteCommandLists(cmdListCount, m_cmdListBatch.data());
 
@@ -391,7 +402,7 @@ void App::render()
     if (m_zeroSize)
         return;
 
-    log("render (elapsed since last: %lld ms)", m_renderTimestamp.restart());
+    //log("render (elapsed since last: %lld ms)", m_renderTimestamp.restart());
 
     if (!m_device) {
         if (!initialize()) {
@@ -412,10 +423,10 @@ void App::render()
 
 App *g_app = nullptr;
 
-App::App(HINSTANCE hInstance, HWND hWnd, Builder::Type builderType)
+App::App(HINSTANCE hInstance, HWND hWnd, Builder::ThreadModel threadModel)
     : m_hInstance(hInstance),
       m_hWnd(hWnd),
-      m_builderType(builderType)
+      m_threadModel(threadModel)
 {
     g_app = this;
 }
@@ -433,7 +444,6 @@ App::~App()
 
 void App::addBuilder(Builder *b)
 {
-    assert(b->type() == m_builderType);
     m_builders.push_back(b);
     b->start();
 }
@@ -468,7 +478,7 @@ void App::postToBuildersAndWait(Builder::Event e, const BuilderTable &bldTab)
 
 void App::postToBuildersAndWait(Builder::Event e, const BuilderList &builders)
 {
-    if (m_builderType == Builder::Type::Threaded) {
+    if (m_threadModel == Builder::ThreadModel::Threaded) {
         const size_t builderCount = builders.size();
         const size_t batchSize = min(builderCount, MAXIMUM_WAIT_OBJECTS);
         const size_t existingSize = m_waitEvents.size();

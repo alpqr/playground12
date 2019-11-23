@@ -8,7 +8,7 @@
 
 struct App
 {
-    App(HINSTANCE hInstance, HWND hWnd, Builder::Type builderType = Builder::Type::Threaded);
+    App(HINSTANCE hInstance, HWND hWnd, Builder::ThreadModel threadModel = Builder::ThreadModel::Threaded);
     ~App();
 
     bool initialize();
@@ -29,7 +29,7 @@ struct App
     void requestUpdate() { m_needsRender = true; }
     void maybeUpdate() { if (m_needsRender) render(); }
 
-    Builder::Type builderType() const { return m_builderType; }
+    Builder::ThreadModel threadModel() const { return m_threadModel; }
     void addBuilder(Builder *b);
     void addBuilders(std::initializer_list<Builder *> args);
     void deleteBuilder(Builder *b);
@@ -45,9 +45,12 @@ struct App
     void addPreFrameFunc(FrameExtraFunc f) { m_preFrameFuncs.push_back(f); }
     void addPostFrameFunc(FrameExtraFunc f) { m_postFrameFuncs.push_back(f); }
 
+    using ReleaseResourcesFunc = std::function<void()>;
+    void addReleaseResourcesFunc(ReleaseResourcesFunc f) { m_releaseResourcesFuncs.push_back(f); }
+
     HINSTANCE m_hInstance;
     HWND m_hWnd;
-    Builder::Type m_builderType;
+    Builder::ThreadModel m_threadModel;
     UINT m_width = DEFAULT_WIDTH;
     UINT m_height = DEFAULT_HEIGHT;
     bool m_zeroSize = false;
@@ -75,9 +78,10 @@ struct App
     BuilderList m_builders;
     std::vector<HANDLE> m_waitEvents;
     std::vector<ID3D12CommandList *> m_cmdListBatch;
+    FrameFunc m_frameFunc = nullptr;
     std::vector<FrameExtraFunc> m_preFrameFuncs;
     std::vector<FrameExtraFunc> m_postFrameFuncs;
-    FrameFunc m_frameFunc = nullptr;
+    std::vector<ReleaseResourcesFunc> m_releaseResourcesFuncs;
 };
 
 #endif
